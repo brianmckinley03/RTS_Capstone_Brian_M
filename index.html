@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bed 4-A — Real-Time ECG Bedside Monitor | Brian McKinley</title>
+<meta name="description" content="EEE 4775 Real-Time Systems capstone: an integrated ESP32-S3 ECG bedside monitor with a rate-monotonic schedule, hazard analysis, and graceful degradation.">
+
+<style>
+  :root{
+    --bg:        #0a0f0e;
+    --panel:     #101615;
+    --panel-2:   #141c1a;
+    --line:      #223028;
+    --text:      #dfe8e4;
+    --text-dim:  #8ba49a;
+    --vitals:    #35d68e;
+    --vitals-dim:#1f6b48;
+    --alarm:     #ff4d4d;
+    --alarm-dim: #7a2222;
+    --fault:     #f2b134;
+    --fault-dim: #7a5715;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:
+      radial-gradient(ellipse 900px 500px at 15% -10%, rgba(53,214,142,0.08), transparent 60%),
+      var(--bg);
+    color:var(--text);
+    font-family:'IBM Plex Sans',-apple-system,Segoe UI,Roboto,sans-serif;
+    line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  code,pre,.mono,.eyebrow,.stat-num,th,.pill,.badge{
+    font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  a{color:var(--vitals);}
+  a:focus-visible,button:focus-visible{outline:2px solid var(--vitals);outline-offset:3px;}
+  .wrap{max-width:980px;margin:0 auto;padding:0 24px;}
+  .eyebrow{
+    font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--vitals);margin:0 0 10px;
+  }
+  h1,h2,h3{font-weight:600;letter-spacing:-0.01em;color:#f2f7f5;}
+  h2{font-size:26px;margin:0 0 6px;}
+  h3{font-size:17px;margin:24px 0 8px;color:var(--text);}
+  p{color:var(--text-dim);}
+  .lede{color:var(--text);}
+
+  /* ---------- header / nav ---------- */
+  header.top{
+    position:sticky;top:0;z-index:20;
+    background:rgba(10,15,14,0.86);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);
+  }
+  .topnav{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;max-width:980px;margin:0 auto;}
+  .brand{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--text);}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--vitals);box-shadow:0 0 8px var(--vitals);animation:pulse 1.8s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  @media (prefers-reduced-motion: reduce){.brand .dot{animation:none}}
+  .topnav nav{display:flex;gap:18px;font-size:13px;}
+  .topnav nav a{color:var(--text-dim);text-decoration:none;}
+  .topnav nav a:hover{color:var(--vitals);}
+
+  /* ---------- hero ---------- */
+  .hero{padding:64px 0 40px;border-bottom:1px solid var(--line);}
+  .hero h1{font-size:clamp(30px,4.4vw,46px);line-height:1.08;margin:0 0 18px;max-width:820px;}
+  .hero .lede{font-size:18px;max-width:640px;margin:0 0 30px;}
+  .hero-cta{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:44px;}
+  .btn{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:11px 18px;border-radius:6px;font-size:14px;font-weight:600;
+    text-decoration:none;border:1px solid transparent;font-family:inherit;
+  }
+  .btn-primary{background:var(--vitals);color:#04140d;}
+  .btn-primary:hover{background:#4ee6a1;}
+  .btn-ghost{border-color:var(--line);color:var(--text);}
+  .btn-ghost:hover{border-color:var(--vitals);color:var(--vitals);}
+
+  /* vitals strip -- the "signature" readout row */
+  .vitals-strip{
+    display:grid;grid-template-columns:repeat(4,1fr);
+    border:1px solid var(--line);border-radius:8px;overflow:hidden;
+    background:var(--panel);
+  }
+  .vstat{padding:16px 18px;border-right:1px solid var(--line);}
+  .vstat:last-child{border-right:none;}
+  .vstat .stat-num{font-size:24px;color:var(--vitals);display:block;}
+  .vstat .stat-label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;}
+  @media (max-width:680px){.vitals-strip{grid-template-columns:repeat(2,1fr);}
+    .vstat:nth-child(2){border-right:none;} .vstat{border-bottom:1px solid var(--line);}}
+
+  /* ---------- waveform signature ---------- */
+  .waveform-wrap{margin-top:40px;border:1px solid var(--line);border-radius:8px;background:var(--panel);overflow:hidden;}
+  .waveform-wrap svg{display:block;width:100%;height:auto;}
+  .trace{fill:none;stroke:var(--vitals);stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}
+  .sweep{fill:url(#sweepGrad);}
+  @keyframes sweepmove{from{transform:translateX(-260px)}to{transform:translateX(1100px)}}
+  .sweep-group{animation:sweepmove 4.5s linear infinite;}
+  @media (prefers-reduced-motion: reduce){.sweep-group{animation:none;opacity:0;}}
+
+  /* ---------- sections ---------- */
+  section.block{padding:56px 0;border-bottom:1px solid var(--line);}
+  section.block:last-of-type{border-bottom:none;}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:22px 24px;}
+
+  /* ---------- video / wokwi ---------- */
+  .media-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:20px;margin-top:20px;}
+  @media (max-width:780px){.media-grid{grid-template-columns:1fr;}}
+  .video-frame{position:relative;padding-bottom:56.25%;height:0;border-radius:8px;overflow:hidden;border:1px solid var(--line);}
+  .video-frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0;}
+  .side-panel h3{margin-top:0;}
+  .shot{border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-top:14px;}
+  .shot img{display:block;width:100%;height:auto;}
+  .shot figcaption{padding:10px 14px;font-size:12.5px;color:var(--text-dim);border-top:1px solid var(--line);}
+
+  /* ---------- architecture svg ---------- */
+  .diagram-wrap{margin-top:22px;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:12px;overflow-x:auto;}
+  .diagram-wrap svg{display:block;min-width:760px;}
+  .legend{display:flex;gap:22px;flex-wrap:wrap;margin-top:14px;font-size:12.5px;color:var(--text-dim);}
+  .legend span{display:inline-flex;align-items:center;gap:7px;}
+  .swatch{width:11px;height:11px;border-radius:3px;display:inline-block;}
+
+  /* ---------- tables ---------- */
+  table{width:100%;border-collapse:collapse;margin-top:16px;font-size:13.5px;}
+  th{
+    text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--text-dim);padding:9px 12px;border-bottom:1px solid var(--line);font-weight:500;
+  }
+  td{padding:10px 12px;border-bottom:1px solid var(--line);color:var(--text);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  td code, p code, li code{
+    background:var(--panel-2);border:1px solid var(--line);border-radius:4px;
+    padding:1px 6px;font-size:12px;color:var(--vitals);
+  }
+  .pill{
+    display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;
+    border:1px solid currentColor;
+  }
+  .pill.never{color:var(--vitals);}
+  .pill.d1{color:var(--fault);}
+  .pill.d2{color:#ff9d4d;}
+
+  /* ---------- hazard severity tags ---------- */
+  .sev{font-size:11px;padding:2px 7px;border-radius:4px;font-weight:600;}
+  .sev.cat{background:var(--alarm-dim);color:#ffb4b4;}
+  .sev.maj{background:var(--fault-dim);color:#ffdca0;}
+  .sev.min{background:var(--vitals-dim);color:#b7f0d3;}
+
+  /* ---------- readme embed ---------- */
+  #readme .panel{max-height:none;}
+  .readme-body{font-size:14.5px;}
+  .readme-body h1{font-size:24px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-top:0;}
+  .readme-body h2{font-size:19px;margin-top:34px;color:#f2f7f5;border-top:1px solid var(--line);padding-top:26px;}
+  .readme-body h3{font-size:15px;color:var(--vitals);}
+  .readme-body p,.readme-body li{color:var(--text-dim);font-size:14px;}
+  .readme-body a{word-break:break-word;}
+  .readme-body table{font-size:12.5px;}
+  .readme-body code{background:var(--panel-2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--vitals);font-size:12px;}
+  .readme-body pre{background:#0d1312;border:1px solid var(--line);border-radius:6px;padding:14px;overflow-x:auto;}
+  .readme-body pre code{border:none;padding:0;background:none;color:var(--text);}
+  .readme-body blockquote{margin:0;padding:10px 16px;border-left:3px solid var(--vitals-dim);background:var(--panel-2);color:var(--text-dim);border-radius:0 6px 6px 0;}
+  .readme-body hr{border:none;border-top:1px solid var(--line);margin:30px 0;}
+  details#readme-toggle summary{
+    cursor:pointer;color:var(--vitals);font-family:'IBM Plex Mono',monospace;font-size:13px;
+    padding:14px 18px;border:1px solid var(--line);border-radius:8px;background:var(--panel);
+    list-style:none;
+  }
+  details#readme-toggle summary::-webkit-details-marker{display:none;}
+  details#readme-toggle summary::after{content:" ▸ expand full README.md";}
+  details#readme-toggle[open] summary::after{content:" ▾ collapse";}
+  details#readme-toggle[open] summary{border-radius:8px 8px 0 0;border-bottom:none;}
+
+  footer{padding:40px 0 60px;color:var(--text-dim);font-size:13px;}
+  footer a{color:var(--text-dim);}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="topnav">
+    <div class="brand"><span class="dot"></span> BED 4-A &nbsp;/&nbsp; EEE 4775 CAPSTONE</div>
+    <nav>
+      <a href="#demo">Demo</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#schedule">Schedule</a>
+      <a href="#risk">Risk</a>
+      <a href="#standards">Standards</a>
+      <a href="#verification">Verification</a>
+      <a href="#readme">Full README</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <section class="hero">
+    <p class="eyebrow">Real-Time Systems &middot; Capstone Project</p>
+    <h1>An ECG bedside monitor that would rather tell you it's degraded than pretend to be fine.</h1>
+    <p class="lede">Bed 4-A runs on an ESP32-S3 in the Wokwi simulator. It samples a simulated
+      ECG, detects arrhythmias, and drives a highest-priority alarm — and when the system
+      itself is overloaded, it sheds telemetry and logging first, in a fixed order, while
+      vitals capture, detection, and the alarm path are never shed. Built by merging five
+      semester assignments into one schedule, with a hazard analysis and a graceful-degradation
+      design layered on top.</p>
+
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="#demo">Watch the demo</a>
+      <a class="btn btn-ghost" href="README.md">Read the full README</a>
+    </div>
+
+    <div class="vitals-strip">
+      <div class="vstat"><span class="stat-num">8</span><span class="stat-label">FreeRTOS tasks</span></div>
+      <div class="vstat"><span class="stat-num">2</span><span class="stat-label">Cores in use</span></div>
+      <div class="vstat"><span class="stat-num">13.4%</span><span class="stat-label">Budgeted CPU utilization</span></div>
+      <div class="vstat"><span class="stat-num">8</span><span class="stat-label">Hazards analyzed</span></div>
+    </div>
+
+    <div class="waveform-wrap">
+      <svg viewBox="0 0 1100 140" preserveAspectRatio="none" role="img" aria-label="Stylized ECG waveform trace">
+        <defs>
+          <linearGradient id="sweepGrad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#35d68e" stop-opacity="0"/>
+            <stop offset="50%" stop-color="#35d68e" stop-opacity="0.35"/>
+            <stop offset="100%" stop-color="#35d68e" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <path class="trace" opacity="0.55" d="M0,70 L60,70 L80,70 L92,40 L104,100 L116,15 L128,110 L140,70 L200,70
+          L260,70 L280,70 L292,40 L304,100 L316,15 L328,110 L340,70 L400,70
+          L460,70 L480,70 L492,40 L504,100 L516,15 L528,110 L540,70 L600,70
+          L660,70 L680,70 L692,40 L704,100 L716,15 L728,110 L740,70 L800,70
+          L860,70 L880,70 L892,40 L904,100 L916,15 L928,110 L940,70 L1000,70 L1100,70"/>
+        <g class="sweep-group"><rect class="sweep" x="0" y="0" width="260" height="140"/></g>
+      </svg>
+    </div>
+  </section>
+
+  <section class="block" id="demo">
+    <p class="eyebrow">Waveform / Demo</p>
+    <h2>See it running</h2>
+    <p>A four-minute walkthrough: the live alarm path, the task schedule, and the degradation
+      ladder actually stepping down under a forced CPU overload.</p>
+
+    <div class="media-grid">
+      <div class="video-frame">
+        <iframe src="https://www.youtube.com/embed/5xjPJvX7efs" title="Bed 4-A demo video" allowfullscreen></iframe>
+      </div>
+      <div class="side-panel">
+        <h3>Run it yourself</h3>
+        <p>The full project — firmware, wiring diagram, and build config — runs live in Wokwi's
+          ESP32-S3 simulator, no hardware required.</p>
+        <a class="btn btn-ghost" href="WOKWI_LINK_HERE" target="_blank" rel="noopener">Open Wokwi simulation</a>
+        <figure class="shot">
+          <img src="images/wiring-diagram.png" alt="Wokwi wiring diagram: ESP32-S3 with alarm, vitals, and fault LEDs, STAT and SIM buttons, and a logic-analyzer probe">
+          <figcaption>Alarm (red), vitals (green), and fault (yellow) LEDs — kept physically separate on purpose, see the hazard table below.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div class="wrap">
+  <section class="block" id="architecture">
+    <p class="eyebrow">Topology</p>
+    <h2>Eight tasks, two cores, one priority order</h2>
+    <p>Priority is assigned rate-monotonically &mdash; shorter period, higher priority &mdash;
+      with two ISR-driven tasks anchored above all of them, because an interrupt-driven alarm
+      has to win a scheduling contest against periodic housekeeping every time.</p>
+    <div class="diagram-wrap"><svg viewBox="0 0 900 526" role="img" aria-label="Task priority ladder">
+<text x="20" y="26" fill="#8ba49a" font-size="12" letter-spacing="0.06em" font-family='IBM Plex Mono'>TASK &#183; PRIORITY (LONGER BAR = HIGHER PRIORITY) &#183; CORE &#183; TRIGGER</text>
+<g>
+<text x="20" y="61.0" fill="#dfe8e4" font-size="13" font-family='IBM Plex Mono'>task_alarm_isr</text>
+<text x="20" y="77.0" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>core 1 &#183; binary sem (ISR or SW)</text>
+<rect x="300" y="55" width="380" height="22" rx="3" fill="#141c1a" stroke="#223028"/>
+<rect x="300" y="55" width="380" height="22" rx="3" fill="#35d68e" opacity="0.85"/>
+<text x="694" y="70.0" fill="#35d68e" font-size="13" font-family='IBM Plex Mono' font-weight="600">20</text>
+</g>
+<g>
+<text x="20" y="107.0" fill="#dfe8e4" font-size="13" font-family='IBM Plex Mono'>task_ecg_sample</text>
+<text x="20" y="123.0" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>core 1 &#183; periodic 10 ms</text>
+<rect x="300" y="101" width="380" height="22" rx="3" fill="#141c1a" stroke="#223028"/>
+<rect x="300" y="101" width="285" height="22" rx="3" fill="#35d68e" opacity="0.85"/>
+<text x="694" y="116.0" fill="#35d68e" font-size="13" font-family='IBM Plex Mono' font-weight="600">15</text>
+</g>
+<g>
+<text x="20" y="153.0" fill="#dfe8e4" font-size="13" font-family='IBM Plex Mono'>task_ui_notify</text>
+<text x="20" y="169.0" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>core 1 &#183; direct notification</text>
+<rect x="300" y="147" width="380" height="22" rx="3" fill="#141c1a" stroke="#223028"/>
+<rect x="300" y="147" width="247" height="22" rx="3" fill="#35d68e" opacity="0.85"/>
+<text x="694" y="162.0" fill="#35d68e" font-size="13" font-family='IBM Plex Mono' font-weight="600">13</text>
+</g>
+<g>
+<text x="20" y="199.0" fill="#dfe8e4" font-size="13" font-family='IBM Plex Mono'>task_arrhy_detect</text>
+<text x="20" y="215.0" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>core 1 &#183; periodic 20 ms</text>
+<rect x="300" y="193" width="380" height="22" rx="3" fill="#141c1a" stroke="#223028"/>
+<rect x="300" y="193" width="228" height="22" rx="3" fill="#35d68e" opacity="0.85"/>
+<text x="694" y="208.0" fill="#35d68e" font-size="13" font-family='IBM Plex Mono' font-weight="600">12</text>
+</g>
+<g>
+<text x="20" y="245.0" fill="#dfe8e4" font-size="13" font-family='IBM Plex Mono'>task_coordinator</text>
+<text x="20" y="261.0" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>core 1 &#183; event group rendezvous</text>
+<rect x="300" y="239" width="380" height="22" rx="3" fill="#141c1a" stroke="#223028"/>
+<rect x="300" y="239" width="209" height="22" rx="3" fill="#f2b134" opacity="0.85"/>
+<text x="694" y="254.0" fill="#f2b134" font-size="13" font-family='IBM Plex Mono' font-weight="600">11</text>
+</g>
+<g>
+<text x="20" y="291.0" fill="#dfe8e4" font-size="13" font-family='IBM Plex Mono'>task_alarm_dispatch</text>
+<text x="20" y="307.0" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>core 1 &#183; periodic 40 ms</text>
+<rect x="300" y="285" width="380" height="22" rx="3" fill="#141c1a" stroke="#223028"/>
+<rect x="300" y="285" width="152" height="22" rx="3" fill="#f2b134" opacity="0.85"/>
+<text x="694" y="300.0" fill="#f2b134" font-size="13" font-family='IBM Plex Mono' font-weight="600">8</text>
+</g>
+<g>
+<text x="20" y="337.0" fill="#dfe8e4" font-size="13" font-family='IBM Plex Mono'>task_degr_manager</text>
+<text x="20" y="353.0" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>core 1 &#183; periodic 100 ms</text>
+<rect x="300" y="331" width="380" height="22" rx="3" fill="#141c1a" stroke="#223028"/>
+<rect x="300" y="331" width="114" height="22" rx="3" fill="#35d68e" opacity="0.85"/>
+<text x="694" y="346.0" fill="#35d68e" font-size="13" font-family='IBM Plex Mono' font-weight="600">6</text>
+</g>
+<g>
+<text x="20" y="383.0" fill="#dfe8e4" font-size="13" font-family='IBM Plex Mono'>task_web_monitor</text>
+<text x="20" y="399.0" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>core 0 &#183; event-driven (HTTP)</text>
+<rect x="300" y="377" width="380" height="22" rx="3" fill="#141c1a" stroke="#223028"/>
+<rect x="300" y="377" width="95" height="22" rx="3" fill="#35d68e" opacity="0.85"/>
+<text x="694" y="392.0" fill="#35d68e" font-size="13" font-family='IBM Plex Mono' font-weight="600">5</text>
+</g>
+<g>
+<text x="20" y="429.0" fill="#dfe8e4" font-size="13" font-family='IBM Plex Mono'>task_serial_monitor</text>
+<text x="20" y="445.0" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>core 0 &#183; periodic 1000 ms</text>
+<rect x="300" y="423" width="380" height="22" rx="3" fill="#141c1a" stroke="#223028"/>
+<rect x="300" y="423" width="76" height="22" rx="3" fill="#35d68e" opacity="0.85"/>
+<text x="694" y="438.0" fill="#35d68e" font-size="13" font-family='IBM Plex Mono' font-weight="600">4</text>
+</g>
+<g>
+<text x="20" y="475.0" fill="#dfe8e4" font-size="13" font-family='IBM Plex Mono'>task_data_log</text>
+<text x="20" y="491.0" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>core 1 &#183; periodic 200 ms</text>
+<rect x="300" y="469" width="380" height="22" rx="3" fill="#141c1a" stroke="#223028"/>
+<rect x="300" y="469" width="57" height="22" rx="3" fill="#ff9d4d" opacity="0.85"/>
+<text x="694" y="484.0" fill="#ff9d4d" font-size="13" font-family='IBM Plex Mono' font-weight="600">3</text>
+</g>
+</svg></div>
+    <div class="legend">
+      <span><span class="swatch" style="background:#35d68e"></span>never shed</span>
+      <span><span class="swatch" style="background:#f2b134"></span>shed at DEGRADED_1</span>
+      <span><span class="swatch" style="background:#ff9d4d"></span>shed at DEGRADED_2</span>
+    </div>
+
+    <h3>The path that's never allowed to fail</h3>
+    <p>Whether an alarm comes from a clinician pressing STAT or the software detecting an
+      abnormal reading, both feed the same binary semaphore into the same highest-priority
+      task. Telemetry about that alarm is queued separately and is allowed to drop under
+      load &mdash; the LED above it is not.</p>
+    <div class="diagram-wrap"><svg viewBox="0 0 900 230" role="img" aria-label="Never-shed alarm path diagram">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#35d68e"/></marker></defs>
+<rect x="10" y="10" width="190" height="56" rx="7" fill="#141c1a" stroke="#f2b134" stroke-width="1.4"/><text x="105.0" y="34.0" text-anchor="middle" fill="#dfe8e4" font-size="12.5" font-family='IBM Plex Mono'>STAT button</text><text x="105.0" y="51.0" text-anchor="middle" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>clinician-triggered</text>
+<rect x="10" y="90" width="190" height="56" rx="7" fill="#141c1a" stroke="#35d68e" stroke-width="1.4"/><text x="105.0" y="114.0" text-anchor="middle" fill="#dfe8e4" font-size="12.5" font-family='IBM Plex Mono'>task_arrhy_detect</text><text x="105.0" y="131.0" text-anchor="middle" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>software-detected</text>
+<rect x="260" y="50" width="190" height="56" rx="7" fill="#141c1a" stroke="#dfe8e4" stroke-width="1.4"/><text x="355.0" y="74.0" text-anchor="middle" fill="#dfe8e4" font-size="12.5" font-family='IBM Plex Mono'>stat_alarm_sem</text><text x="355.0" y="91.0" text-anchor="middle" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>binary semaphore</text>
+<line x1="200" y1="38" x2="260" y2="68" stroke="#35d68e" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="200" y1="118" x2="260" y2="88" stroke="#35d68e" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="510" y="50" width="190" height="56" rx="7" fill="#141c1a" stroke="#ff4d4d" stroke-width="1.4"/><text x="605.0" y="74.0" text-anchor="middle" fill="#dfe8e4" font-size="12.5" font-family='IBM Plex Mono'>task_alarm_isr</text><text x="605.0" y="91.0" text-anchor="middle" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>priority 20 &#183; never shed</text>
+<line x1="450" y1="78" x2="510" y2="78" stroke="#35d68e" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="760" y="50" width="130" height="56" rx="7" fill="#141c1a" stroke="#ff4d4d" stroke-width="1.4"/><text x="825.0" y="74.0" text-anchor="middle" fill="#dfe8e4" font-size="12.5" font-family='IBM Plex Mono'>LED_ALARM</text><text x="825.0" y="91.0" text-anchor="middle" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>physical output</text>
+<line x1="700" y1="78" x2="760" y2="78" stroke="#35d68e" stroke-width="1.6" marker-end="url(#arrow)"/>
+<line x1="605" y1="106" x2="605" y2="160" stroke="#f2b134" stroke-width="1.4" stroke-dasharray="3,3" marker-end="url(#arrow)"/>
+<rect x="430" y="160" width="350" height="50" rx="7" fill="#171f19" stroke="#f2b134" stroke-width="1.4"/><text x="605.0" y="181.0" text-anchor="middle" fill="#dfe8e4" font-size="12.5" font-family='IBM Plex Mono'>task_alarm_dispatch (queue)</text><text x="605.0" y="198.0" text-anchor="middle" fill="#8ba49a" font-size="10.5" font-family='IBM Plex Sans'>telemetry only &#183; sheddable &#183; never gates the LED above</text>
+</svg></div>
+  </section>
+</div>
+
+
+<div class="wrap">
+  <section class="block" id="schedule">
+    <p class="eyebrow">Schedule</p>
+    <h2>Budgeted well under the schedulability bound</h2>
+    <p>WCET figures below are design-time budgets &mdash; conservative upper bounds derived
+      from operation counts, sized before hardware measurement, which is standard practice
+      for scheduling a safety-relevant task set. The firmware carries the instrumentation
+      (<code>wcet_*_us</code>, <code>deadline_miss_*</code>) to verify against these budgets.</p>
+    <div class="panel">
+      <table>
+        <thead><tr><th>Task</th><th>Period</th><th>WCET budget</th><th>Utilization</th></tr></thead>
+        <tbody>
+          <tr><td><code>task_ecg_sample</code></td><td>10 ms</td><td>300 &micro;s</td><td>3.0%</td></tr>
+          <tr><td><code>task_arrhy_detect</code></td><td>20 ms</td><td>1,000 &micro;s</td><td>5.0%</td></tr>
+          <tr><td><code>task_alarm_dispatch</code></td><td>40 ms</td><td>2,000 &micro;s</td><td>5.0%</td></tr>
+          <tr><td><code>task_degr_manager</code></td><td>100 ms</td><td>200 &micro;s</td><td>0.2%</td></tr>
+          <tr><td><code>task_data_log</code></td><td>200 ms</td><td>300 &micro;s</td><td>0.15%</td></tr>
+          <tr><td colspan="3" style="color:#8ba49a">Total budgeted utilization</td><td style="color:#35d68e;font-weight:600">&asymp;13.4%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:14px">Liu &amp; Layland's bound for 5 periodic tasks is
+      <strong style="color:#dfe8e4">74.35%</strong>. 13.4% leaves large deliberate margin for
+      scheduling jitter, cache/flash stalls the budgets don't model, and future growth &mdash;
+      headroom is a safety margin here, not waste.</p>
+  </section>
+</div>
+
+
+<div class="wrap">
+  <section class="block" id="risk">
+    <p class="eyebrow">Risk</p>
+    <h2>Eight hazards, each with a traceable mitigation</h2>
+    <p>An FMEA-style hazard log, tailored to this project's scope &mdash; not a full ISO 14971
+      risk file. Every mitigation below is verifiable by a specific compile-time toggle or a
+      counter the firmware exposes.</p>
+    <div class="panel" style="overflow-x:auto">
+      <table style="min-width:720px">
+        <thead><tr><th>ID</th><th>Hazard</th><th>Severity</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr><td>H-01</td><td>Loss of vitals capture</td><td><span class="sev cat">Catastrophic</span></td><td>Heartbeat watchdog forces immediate <code>SAFE_MINIMAL</code>, no hysteresis</td></tr>
+          <tr><td>H-02</td><td>Lock contention / deadlock risk</td><td><span class="sev maj">Major</span></td><td>5&nbsp;ms bounded mutex timeout, counted and escalated</td></tr>
+          <tr><td>H-03</td><td>Alarm fails to activate or is delayed</td><td><span class="sev cat">Catastrophic</span></td><td>Alarm task at priority 20, minimal ISR work, immediate yield</td></tr>
+          <tr><td>H-04</td><td>ECG backlog overrun, samples lost silently</td><td><span class="sev maj">Major</span></td><td>Counted ring-buffer overrun, not silent; escalates the ladder</td></tr>
+          <tr><td>H-05</td><td>Mode &ldquo;flapping&rdquo; between normal and degraded</td><td><span class="sev min">Minor</span></td><td>Asymmetric hysteresis &mdash; fail fast, recover cautiously</td></tr>
+          <tr><td>H-06</td><td>System fault confused with patient alarm</td><td><span class="sev maj">Major</span></td><td>Physically separate LEDs and data fields, never conflated</td></tr>
+          <tr><td>H-07</td><td>Torn read on shared patient record</td><td><span class="sev maj">Major</span></td><td>Mutex around every access to <code>patient_record_t</code></td></tr>
+          <tr><td>H-08</td><td>Priority inversion delays the alarm task</td><td><span class="sev cat">Catastrophic</span></td><td>Real FreeRTOS mutex with priority inheritance, not a binary semaphore lock</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:14px">Full cause/effect/likelihood/verification detail for all eight
+      is in the README below.</p>
+  </section>
+</div>
+
+
+<div class="wrap">
+  <section class="block" id="standards">
+    <p class="eyebrow">Standards</p>
+    <h2>IEC 62304, in spirit &mdash; not a compliance claim</h2>
+    <p>This borrows IEC 62304's <em>way of thinking</em> about medical device software &mdash;
+      safety classification, hazard-driven design, documented verification &mdash; without
+      claiming compliance, certification, or fitness for clinical use.</p>
+    <div class="panel">
+      <p class="lede" style="margin:0 0 14px">If Bed 4-A's alarm function were a real product,
+        the relevant 62304 question is: could software failure contribute to death or serious
+        injury? Here, yes &mdash; a delayed alarm could delay intervention. That reasoning is
+        why the alarm path (H-03, H-08) is never shed and always highest priority, even though
+        the artifact itself &mdash; a Wokwi simulation with a synthetic waveform, no patient
+        interface &mdash; isn't operating at that level of real-world risk. The design behaves
+        as if it were Class B/C-relevant; the deployment context is not.</p>
+      <h3 style="margin-top:0">What a real submission would additionally require</h3>
+      <p style="margin:0">A maintained Design History File and independent V&amp;V; a full
+        ISO&nbsp;14971 risk management file with residual-risk sign-off; requirements-to-test
+        traceability; usability engineering per IEC&nbsp;62366; cybersecurity review per
+        IEC&nbsp;81001-5-1; qualified hardware and a controlled build process; and a regulatory
+        submission. None of that exists here.</p>
+    </div>
+  </section>
+</div>
+
+
+<div class="wrap">
+  <section class="block" id="verification">
+    <p class="eyebrow">Verification</p>
+    <h2>What was actually tested, and two real bugs it found</h2>
+    <div class="media-grid">
+      <figure class="shot" style="margin:0">
+        <img src="images/verified-run.png" alt="Serial log showing mode=NORMAL held for a 9+ second run with zero mutex timeouts and zero ring overruns">
+        <figcaption>A clean run after both fixes below &mdash; <code>mode=NORMAL</code> held, <code>transitions=0</code>, <code>ring_ovr=0</code>, <code>mtx_to=0</code>.</figcaption>
+      </figure>
+      <div class="side-panel">
+        <h3 style="margin-top:0">Confirmed clean, across multiple runs</h3>
+        <p>Zero ECG ring-buffer overruns (H-04) and zero mutex timeouts (H-02) under normal
+          load. The degradation ladder held <code>NORMAL</code> with no spurious transitions
+          for the full length of a 9+ second run.</p>
+        <h3>Two bugs found and fixed</h3>
+        <p><strong style="color:#dfe8e4">Boot-time race:</strong> the degradation watchdog's
+          first check ran before the ECG task had a real time window to establish a heartbeat
+          baseline, tripping a false <code>SAFE_MINIMAL</code> on every boot. Fixed with a
+          startup grace period.</p>
+        <p><strong style="color:#dfe8e4">Simulated switch bounce:</strong> a single button
+          click produced dozens of ISR fires because the Wokwi diagram didn't disable simulated
+          contact bounce. Fixed in <code>diagram.json</code>.</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+
+<div class="wrap">
+  <section class="block" id="readme">
+    <p class="eyebrow">Full record</p>
+    <h2>The complete README</h2>
+    <p>Everything above is a summary. The full document below has the exact hazard log, the
+      response-time analysis, the graceful-degradation design rationale, engineering Q&amp;A,
+      and the AI-use disclosure.</p>
+    <details id="readme-toggle">
+      <summary></summary>
+      <div class="panel readme-body" style="border-radius:0 0 8px 8px;border-top:none">
+        <h1 id="capstone-bed-4-a-integrated-ecg-bedside-monitor">Capstone — "Bed 4-A" Integrated ECG Bedside Monitor</h1>
+<p><strong>EEE 4775 Real-Time Systems — Capstone Project</strong><br />
+<strong>Author:</strong> Brian McKinley<br />
+<strong>Platform:</strong> ESP32-S3 (esp32s3-devkitc-1), ESP-IDF v5.x, Wokwi simulator<br />
+<strong>Repository theme:</strong> Medical — this is the same "Bed 4-A" bedside monitor that ran through Apps 1–5</p>
+<hr />
+<h2 id="0-what-this-is-and-isnt">0. What this is (and isn't)</h2>
+<p>This capstone integrates the five semester assignments into <strong>one running firmware image</strong> —<br />
+not five separate demos glued together, but a single coherent task set where each<br />
+assignment's technique does a real job in the final system. It adds a <strong>schedule and<br />
+worst-case-timing analysis</strong>, a <strong>hazard analysis</strong>, and a <strong>graceful-degradation</strong> design,<br />
+loosely structured around <strong>IEC 62304</strong>'s way of thinking about medical device software —<br />
+in spirit, not as a compliance claim.</p>
+<blockquote>
+<p><strong>Honesty about scope:</strong> this is a Wokwi/ESP32-S3 coursework simulation. It is <strong>not</strong> a<br />
+certified medical device, has not been through any regulatory process, uses a synthetic<br />
+(fake) ECG waveform, and must never be connected to an actual patient. Section 7 spells<br />
+out exactly what real IEC 62304 compliance would additionally require that this project<br />
+does not attempt.</p>
+</blockquote>
+<hr />
+<h2 id="1-theme-banner-system-summary">1. Theme banner &amp; system summary</h2>
+<p>Bed 4-A is an ESP32-S3 bedside monitor that samples a (simulated) single-lead ECG at 10 ms<br />
+intervals, runs a lightweight arrhythmia detector over that stream, and drives a<br />
+highest-priority, interrupt-driven alarm path when either the detector or a clinician<br />
+(via a STAT button) flags a problem. A web dashboard and serial log report system state in<br />
+real time. When the system is overloaded or a fault is detected, it <strong>degrades gracefully</strong><br />
+in a fixed, documented order — shedding telemetry and logging first, and never shedding<br />
+vitals capture, detection, or the alarm output itself.</p>
+<p>Every primitive in this file was graded once already, in isolation, in Apps 1–5. This<br />
+project's job was to make them cooperate under one schedule instead of five separate ones.</p>
+<table>
+<thead>
+<tr>
+<th>Assignment</th>
+<th>What it contributed</th>
+<th>Where it lives now</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>App 1</td>
+<td>Dual-core split, HTTP dashboard</td>
+<td><code>task_web_monitor</code> (Core 0), <code>handle_root</code>/<code>handle_state</code></td>
+</tr>
+<tr>
+<td>App 2</td>
+<td>The periodic task set itself (10/20/40/100 ms)</td>
+<td>The whole Core-1 schedule (Section 4)</td>
+</tr>
+<tr>
+<td>App 3</td>
+<td>ISR top-half/bottom-half, latency proof</td>
+<td><code>stat_button_isr</code> → <code>task_alarm_isr</code>, <code>BREAK_ISR_SAFETY_RULE</code></td>
+</tr>
+<tr>
+<td>App 4</td>
+<td>Mutex, counting semaphore, binary semaphore, induced-failure &amp; priority-inversion demos</td>
+<td><code>record_mutex</code>, <code>sample_backlog_sem</code>, <code>stat_alarm_sem</code>, <code>INDUCE_FAILURE</code>, <code>PRIORITY_INVERSION_DEMO</code></td>
+</tr>
+<tr>
+<td>App 5</td>
+<td>Queue, event group, direct task notification</td>
+<td><code>alarm_evt_q</code>, <code>cycle_evt_group</code>, <code>ui_notify_handle</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>New in the capstone</strong>, not present in any single assignment: the degradation ladder<br />
+(<code>system_mode_t</code> + <code>task_degr_manager</code>), per-task WCET/deadline-miss instrumentation, the<br />
+hazard table, and the physically-separate FAULT annunciator.</p>
+<p>This project has been built, flashed, and run in the Wokwi ESP32-S3 simulator; Section 4.6<br />
+documents the verification session, including two bugs found and fixed during that testing.</p>
+<hr />
+<h2 id="2-architecture-concurrency-map">2. Architecture &amp; concurrency map</h2>
+<pre><code> CORE 1 (real-time plane)                          CORE 0 (observability plane)
+ ┌─────────────────────────────────────────┐       ┌───────────────────────────┐
+ │ prio 20  task_alarm_isr        (ISR-driven)      │ prio 4  task_serial_mon   │
+ │ prio 15  task_ecg_sample       10 ms  ─┐         │ prio 4  task_web_monitor  │
+ │ prio 13  task_ui_notify        (ISR-driven)      │          (HTTP :80)       │
+ │ prio 12  task_arrhy_detect     20 ms  ←┘─┐       └───────────────────────────┘
+ │ prio 11  task_coordinator      event-driven│
+ │ prio  8  task_alarm_dispatch   40 ms      │
+ │ prio  6  task_degr_manager     100 ms     │
+ │ prio  3  task_data_log         200 ms     │
+ └─────────────────────────────────────────┘
+</code></pre>
+<p><strong>Data flow (steady state):</strong></p>
+<pre><code> STAT button ──ISR──┬──(binary sem)──► task_alarm_isr ──► LED_ALARM, patient_record.alarm_*
+                     └──(notify)──────► task_ui_notify ──► last_stat_ui_refresh_ms
+
+ task_ecg_sample ──(ring+counting sem)──► task_arrhy_detect ──(if abnormal, binary sem)──► task_alarm_isr
+        │                                        │
+        └──(EV_SAMPLE_READY)──► task_coordinator ◄──(EV_DETECT_DONE)──┘   [instrumentation only]
+
+ task_alarm_isr ──(queue)──► task_alarm_dispatch ──► telemetry log line   [sheddable]
+
+ task_degr_manager ──watches counters──► system_mode ──► LED_FAULT, patient_record.mode
+                                                        ──► every sheddable task checks system_mode
+</code></pre>
+<p><strong>Never-shed path (bold in the diagram's spirit):</strong> STAT/anomaly → <code>stat_alarm_sem</code> →<br />
+<code>task_alarm_isr</code> → <code>LED_ALARM_GPIO</code>, plus the <code>task_ecg_sample</code>→<code>task_arrhy_detect</code> pipeline<br />
+that feeds it. Everything else can be shed by <code>task_degr_manager</code> without compromising the<br />
+patient-facing alarm function.</p>
+<hr />
+<h2 id="3-task-set-pin-map-and-ipc-primitive-map">3. Task set, pin map, and IPC primitive map</h2>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>Core</th>
+<th>Priority</th>
+<th>Trigger</th>
+<th>Shed tier</th>
+<th>Primitive(s) it uses</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>task_alarm_isr</code></td>
+<td>1</td>
+<td>20</td>
+<td>binary sem (ISR or SW)</td>
+<td><strong>never</strong></td>
+<td>binary semaphore [App4], mutex [App4], queue [App5]</td>
+</tr>
+<tr>
+<td><code>task_ecg_sample</code></td>
+<td>1</td>
+<td>15</td>
+<td>periodic 10 ms</td>
+<td><strong>never</strong></td>
+<td>counting semaphore [App4], event group [App5]</td>
+</tr>
+<tr>
+<td><code>task_ui_notify</code></td>
+<td>1</td>
+<td>13</td>
+<td>direct notification (ISR)</td>
+<td>never (cheap)</td>
+<td>task notification [App5]</td>
+</tr>
+<tr>
+<td><code>task_arrhy_detect</code></td>
+<td>1</td>
+<td>12</td>
+<td>periodic 20 ms</td>
+<td><strong>never</strong></td>
+<td>counting semaphore [App4], mutex [App4], binary sem, event group</td>
+</tr>
+<tr>
+<td><code>task_coordinator</code></td>
+<td>1</td>
+<td>11</td>
+<td>event group (both bits)</td>
+<td>DEGRADED_1</td>
+<td>event group [App5]</td>
+</tr>
+<tr>
+<td><code>task_alarm_dispatch</code></td>
+<td>1</td>
+<td>8</td>
+<td>periodic 40 ms</td>
+<td>DEGRADED_1</td>
+<td>queue [App5]</td>
+</tr>
+<tr>
+<td><code>task_degr_manager</code></td>
+<td>1</td>
+<td>6</td>
+<td>periodic 100 ms</td>
+<td><strong>never</strong></td>
+<td>mutex [App4]</td>
+</tr>
+<tr>
+<td><code>task_data_log</code></td>
+<td>1</td>
+<td>3</td>
+<td>periodic 200 ms</td>
+<td>DEGRADED_2</td>
+<td>mutex [App4]</td>
+</tr>
+<tr>
+<td><code>task_serial_monitor</code></td>
+<td>0</td>
+<td>4</td>
+<td>periodic 1000 ms</td>
+<td>never (cheap)</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>task_web_monitor</code> / httpd</td>
+<td>0</td>
+<td>4–5</td>
+<td>event-driven (network)</td>
+<td>never (own core)</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Pin map:</strong></p>
+<table>
+<thead>
+<tr>
+<th>GPIO</th>
+<th>Signal</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2</td>
+<td><code>LED_ALARM_GPIO</code> (red) — patient alarm</td>
+<td>App 1 / App 4 pin, reused</td>
+</tr>
+<tr>
+<td>15</td>
+<td><code>LED_VITALS_GPIO</code> (green) — ~1 Hz proof-of-life beacon</td>
+<td>new</td>
+</tr>
+<tr>
+<td>16</td>
+<td><code>LED_FAULT_GPIO</code> (yellow) — system fault/degraded annunciator</td>
+<td>new</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>BTN_STAT_GPIO</code> — clinician STAT button</td>
+<td>App 4 pin, reused</td>
+</tr>
+<tr>
+<td>18</td>
+<td><code>BTN_SIM_GPIO</code> — inject a simulated abnormal-rhythm burst (test aid)</td>
+<td>App 3/5 pin, repurposed</td>
+</tr>
+<tr>
+<td>19</td>
+<td><code>SCOPE_ISR_GPIO</code> — logic-analyzer probe around the STAT ISR</td>
+<td>App 3 pin, reused</td>
+</tr>
+</tbody>
+</table>
+<p>All three IPC primitives App 5's assignment required are present and each does a distinct,<br />
+non-redundant job: the <strong>queue</strong> (<code>alarm_evt_q</code>) decouples the fast alarm path from slower<br />
+telemetry formatting; the <strong>event group</strong> (<code>cycle_evt_group</code>) rendezvous a "sample produced"<br />
+and "sample processed" bit-pair into one pipeline-latency measurement; the <strong>direct<br />
+notification</strong> (<code>ui_notify_handle</code>) is a second, independent bottom-half fed by the same STAT<br />
+ISR as the semaphore path, specifically so their latencies can be compared (see Section 4).</p>
+<hr />
+<h2 id="4-schedule-worst-case-timing-analysis">4. Schedule &amp; worst-case-timing analysis</h2>
+<h3 id="41-priority-assignment">4.1 Priority assignment</h3>
+<p>The five periodic Core-1 tasks are assigned priority by <strong>rate-monotonic scheduling</strong><br />
+(shorter period → higher priority), exactly as Apps 2–4 already established for this task<br />
+set. The two event/ISR-driven tasks (<code>task_alarm_isr</code>, <code>task_ui_notify</code>) sit <strong>above</strong> all<br />
+periodic tasks by design — an interrupt-driven alarm must always win a scheduling<br />
+contest against periodic housekeeping, regardless of RM's period-based ordering.</p>
+<blockquote>
+<p><strong>Change from the App 2 baseline:</strong> the original spec used Alarm_Disp at 40 ms/prio 5 and<br />
+Data_Log at 100 ms/prio 2. The capstone keeps <code>task_alarm_dispatch</code> at 40 ms but moves<br />
+<code>task_data_log</code> to 200 ms (lower frequency logging is enough once the alarm path itself no<br />
+longer depends on it) and inserts the new <code>task_degr_manager</code> at 100 ms/prio 6 — it needed<br />
+a period, and 100 ms was free once data_log moved. Priorities were renumbered<br />
+(20/15/13/12/11/8/6/3) to leave headroom between bands for future tasks without a full<br />
+renumber.</p>
+</blockquote>
+<h3 id="42-utilization-bound-check-liu-layland">4.2 Utilization bound check (Liu &amp; Layland)</h3>
+<p>WCET numbers below are <strong>design-time budgets</strong> — conservative upper bounds derived from the<br />
+loop/operation counts in each task body, sized with deliberate slack rather than measured on<br />
+hardware. This is standard practice for scheduling a safety-relevant task set <em>before</em> the<br />
+firmware exists to measure: budget first, verify against the budget once it's running. The<br />
+firmware carries the instrumentation to do that verification (<code>wcet_*_us</code> and<br />
+<code>deadline_miss_*</code> counters, printed by <code>task_data_log</code> and exposed at <code>/state</code>); Section 4.6<br />
+reports what the verification session actually found.</p>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>Period T</th>
+<th>WCET budget C</th>
+<th>U = C/T</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>task_ecg_sample</code></td>
+<td>10 ms</td>
+<td>300 µs (budget)</td>
+<td>0.030</td>
+</tr>
+<tr>
+<td><code>task_arrhy_detect</code></td>
+<td>20 ms</td>
+<td>1000 µs (budget)</td>
+<td>0.050</td>
+</tr>
+<tr>
+<td><code>task_alarm_dispatch</code></td>
+<td>40 ms</td>
+<td>2000 µs (budget)</td>
+<td>0.050</td>
+</tr>
+<tr>
+<td><code>task_degr_manager</code></td>
+<td>100 ms</td>
+<td>200 µs (budget)</td>
+<td>0.002</td>
+</tr>
+<tr>
+<td><code>task_data_log</code></td>
+<td>200 ms</td>
+<td>300 µs (budget)*</td>
+<td>0.0015</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td></td>
+<td></td>
+<td><strong>U ≈ 0.134 (13.4%)</strong></td>
+</tr>
+</tbody>
+</table>
+<p>* Excludes the <code>ESP_LOGI</code>/UART write itself. That call cannot delay any higher-priority<br />
+task (UART I/O only blocks the task making the call, and <code>task_data_log</code> is the<br />
+lowest-priority task in the set), so it is logging overhead, not safety-relevant WCET — but<br />
+it does count against <code>task_data_log</code>'s <strong>own</strong> deadline, which <code>deadline_miss_log</code> monitors<br />
+independently.</p>
+<p>Liu &amp; Layland's bound for 5 periodic tasks is <code>5·(2^(1/5) − 1) ≈ 0.7435</code> (74.35%).<br />
+<strong>U ≈ 13.4% is well under 74.35%</strong>, so the periodic set is schedulable by the sufficient<br />
+condition, with large deliberate margin — see 4.4 for why that margin is intentional.</p>
+<h3 id="43-exact-response-time-analysis">4.3 Exact response-time analysis</h3>
+<p>Using the standard fixed-priority recurrence <code>R = C + B + Σ⌈R/Tⱼ⌉·Cⱼ</code> over higher-priority<br />
+periodic tasks, plus a one-time blocking term <code>B = 110 µs</code> for aperiodic interference from<br />
+<code>task_alarm_isr</code> (budget 80 µs) and <code>task_ui_notify</code> (budget 30 µs) — justified because both<br />
+periods below (≤200 ms) are shorter than the ~300 ms practical minimum re-arrival time the<br />
+alarm task's own 300 ms LED hold-time imposes on sustained alarms, so at most one occurrence<br />
+of each can land inside any response-time window being computed:</p>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>R (converged)</th>
+<th>T</th>
+<th>R/T</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>task_ecg_sample</code></td>
+<td>380 µs</td>
+<td>10 ms</td>
+<td>3.8%</td>
+</tr>
+<tr>
+<td><code>task_arrhy_detect</code></td>
+<td>1,410 µs</td>
+<td>20 ms</td>
+<td>7.1%</td>
+</tr>
+<tr>
+<td><code>task_alarm_dispatch</code></td>
+<td>3,410 µs</td>
+<td>40 ms</td>
+<td>8.5%</td>
+</tr>
+<tr>
+<td><code>task_degr_manager</code></td>
+<td>3,610 µs</td>
+<td>100 ms</td>
+<td>3.6%</td>
+</tr>
+<tr>
+<td><code>task_data_log</code></td>
+<td>3,910 µs</td>
+<td>200 ms</td>
+<td>2.0%</td>
+</tr>
+</tbody>
+</table>
+<p>Every task's worst-case response time is comfortably inside its period. <code>task_alarm_isr</code><br />
+and <code>task_ui_notify</code> don't get an RTA row — they're the highest-priority, event-driven tasks<br />
+in the system, so their "response time" is just ISR-to-task wake latency, which the firmware<br />
+measures directly (<code>alarm_latency_max_us</code>, <code>notif_latency_max_us</code>) rather than derives.</p>
+<h3 id="44-why-the-margin-is-this-generous">4.4 Why the margin is this generous</h3>
+<p>A safety-relevant alarm path should not be scheduled close to its limits. The ~13% total<br />
+utilization is deliberate slack that absorbs: scheduling jitter, cache/flash-access stalls<br />
+the simple instruction-count budgets don't model, <code>record_lock</code>'s 5 ms mutex-timeout<br />
+worst case landing inside a response-time window, and future feature growth — all without<br />
+re-deriving the schedule. This mirrors why <code>task_alarm_isr</code> sits at priority 20 with almost<br />
+nothing else near it: <strong>headroom is a safety margin, not waste</strong>.</p>
+<h3 id="45-empirical-verification">4.5 Empirical verification</h3>
+<p>Two channels exist for checking the analysis against real behavior:</p>
+<ol>
+<li><strong>Log line</strong> (<code>task_data_log</code>, once per 200 ms): prints every <code>hb_*</code>, <code>wcet_*_us</code>, and<br />
+<code>deadline_miss_*</code> counter.</li>
+<li><strong>Logic analyzer</strong> (<code>SCOPE_ISR_GPIO</code>, GPIO 19): the STAT ISR pulses this pin high for the<br />
+   duration of its top-half, exactly as App 3 used it — a hardware-independent check on the<br />
+   actual ISR window length.</li>
+</ol>
+<h3 id="46-verification-session-results">4.6 Verification session results</h3>
+<p>This firmware was built and run in the Wokwi ESP32-S3 simulator across several multi-second<br />
+sessions. What that testing confirmed, and what it found and fixed:</p>
+<p><strong>Confirmed clean, sustained over multiple runs (via <code>task_serial_monitor</code>'s once-a-second<br />
+summary line):</strong><br />
+- <code>ring_ovr</code> (ECG ring-buffer overrun count) stayed at 0 throughout — no evidence of H-04<br />
+  under normal load.<br />
+- <code>mtx_to</code> (mutex-timeout count) stayed at 0 throughout — no evidence of H-02/H-08 lock<br />
+  contention under normal load.<br />
+- After the fixes below, <code>mode</code> held at <code>NORMAL</code> with <code>transitions=0</code> for the full length of<br />
+  a 9+ second run — the degradation ladder does not trip spuriously under ordinary operation.<br />
+- The STAT alarm path was exercised and produced a <code>[STAT ALARM]</code> log line with an LED<br />
+  response, confirming the ISR → binary-semaphore → <code>task_alarm_isr</code> path is wired correctly<br />
+  end-to-end.</p>
+<p><strong>Not captured in this testing session:</strong> the specific per-task <code>wcet_*_us</code> and<br />
+<code>deadline_miss_*</code> figures from <code>task_data_log</code>'s dedicated log line (a different line than<br />
+the <code>task_serial_monitor</code> summary reviewed above). The counters that gate safety-relevant<br />
+behavior — overrun, mutex-timeout, and mode-transition counts — were confirmed clean, but the<br />
+raw microsecond WCET figures were not separately recorded during this pass. Given the ~13.4%<br />
+budgeted utilization (Section 4.2), no evidence from this session suggests the budgets are<br />
+wrong; that specific data point is simply outside what was gathered here.</p>
+<p><strong>Bug 1 — boot-time false trip into <code>SAFE_MINIMAL</code>.</strong> The first build's very first log line<br />
+after boot was an immediate, unconditional escalation to <code>SAFE_MINIMAL</code>. Root cause:<br />
+<code>task_degr_manager</code>, like every periodic task in this codebase, runs its first loop body<br />
+immediately on creation rather than waiting one period first — normal FreeRTOS style, and<br />
+harmless for something like a blink toggle, but wrong for a watchdog. Its very first delta<br />
+check compared <code>hb_ecg</code> against a baseline captured at essentially the same instant, saw a<br />
+delta of 0–1 heartbeats, and correctly-per-its-logic (but incorrectly-per-intent) read that<br />
+as a stalled ECG task. Fixed in two steps: first, a 150 ms startup grace delay before the<br />
+watchdog's first check; then, because the first fix still captured its baseline and performed<br />
+its first comparison in the same instant, a second fix added one additional full period<br />
+(100 ms) of delay between capturing the baseline and running the first real check. The<br />
+recovery path that fired in response to this bug (<code>SAFE_MINIMAL → DEGRADED_2 → DEGRADED_1 →
+NORMAL</code>, one step per ~1 second) was itself useful evidence: it confirmed the shedding tiers<br />
+and the asymmetric-hysteresis recovery pacing both work exactly as designed, since it was<br />
+observed live rather than only reasoned about.</p>
+<p><strong>Bug 2 — inflated <code>isr_fire_count</code> from simulated switch bounce.</strong> A single STAT button<br />
+click in the simulator produced dozens of ISR fires (<code>isr_fire_count</code> jumping by 30–120 per<br />
+second of testing) rather than one. Root cause: <code>diagram.json</code>'s pushbutton parts did not set<br />
+<code>"bounce": "0"</code>, so Wokwi simulates realistic mechanical contact bounce (multiple rapid<br />
+make/break transitions per physical press); the firmware's 200 µs debounce window is far too<br />
+short to filter that out. This is a diagram/simulation-fidelity issue, not a firmware<br />
+concurrency defect — the binary semaphore absorbs the extra fires harmlessly (a binary<br />
+semaphore that's already given stays given; it doesn't queue or double-fire the alarm task)<br />
+— but it made the ISR fire counter meaningless as a "number of presses" metric. Fix: add<br />
+<code>"bounce": "0"</code> to both <code>btn_stat</code> and <code>btn_sim</code>'s <code>"attrs"</code> in <code>diagram.json</code>, matching the<br />
+approach App 3's diagram already used for its button.</p>
+<p><strong>Known, un-actioned finding:</strong> <code>sw_trigger_count</code> (software-detected-arrhythmia alarms)<br />
+climbs steadily even with no button pressed and no <code>OVERLOAD_DEMO</code>/<code>INDUCE_FAILURE</code> active.<br />
+This is a detection-calibration issue in the inherited <code>std &gt; 6000.0f</code> threshold against the<br />
+inherited synthetic waveform, documented as a known limitation in Section 10 rather than<br />
+fixed here, since it does not affect the alarm path's correctness — only how often it's<br />
+exercised.</p>
+<hr />
+<h2 id="5-hazard-analysis">5. Hazard analysis</h2>
+<p>FMEA-style hazard log, tailored to this project's scope (not a full ISO 14971 risk file —<br />
+see Section 7). Severity/Likelihood use a simple 4-level scale (Low/Med/High for<br />
+likelihood; Minor/Major/Catastrophic for severity, where "Catastrophic" here means "a real<br />
+patient version of this failure could delay recognition of a life-threatening event").</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Hazard</th>
+<th>Cause</th>
+<th>Effect</th>
+<th>Severity</th>
+<th>Likelihood</th>
+<th>Mitigation</th>
+<th>Verification</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>H-01</td>
+<td>Loss of vitals capture</td>
+<td><code>task_ecg_sample</code> stalls, crashes, or is starved</td>
+<td>Monitor goes blind — no data reaches the detector or alarm path</td>
+<td>Catastrophic</td>
+<td>Low</td>
+<td>Heartbeat watchdog: <code>task_degr_manager</code> checks <code>hb_ecg</code> delta every 100 ms; a stall forces <strong>immediate</strong> <code>SAFE_MINIMAL</code> with no hysteresis</td>
+<td><code>OVERLOAD_DEMO=1</code> can be pushed hard enough to reproduce contention; watchdog trip is visible in the log and on <code>LED_FAULT</code></td>
+</tr>
+<tr>
+<td>H-02</td>
+<td>Lock contention / potential deadlock on <code>patient_record_t</code></td>
+<td>Mutex held too long, or genuine deadlock</td>
+<td>A task blocks indefinitely on <code>record_mutex</code>, stalling downstream state updates</td>
+<td>Major</td>
+<td>Low</td>
+<td>Every mutex take is bounded to 5 ms (<code>record_lock</code>); a timeout is <strong>counted</strong> (<code>mutex_timeout_count</code>) and escalates to <code>SAFE_MINIMAL</code> immediately</td>
+<td><code>mutex_timeout_count</code> in the log/dashboard; should stay 0 in normal operation</td>
+</tr>
+<tr>
+<td>H-03</td>
+<td>Alarm fails to activate, or activates late</td>
+<td>Slow/blocked ISR bottom-half</td>
+<td>Missed or delayed clinical alarm</td>
+<td>Catastrophic</td>
+<td>Low</td>
+<td><code>task_alarm_isr</code> at priority 20 (highest in system); ISR does only counter + semaphore-give + notify, nothing blocking (App 3 top-half discipline); <code>portYIELD_FROM_ISR</code> forces immediate preemption</td>
+<td><code>alarm_latency_max_us</code> instrumentation; <code>BREAK_ISR_SAFETY_RULE=1</code> reproduces the latency cost of skipping the yield, for comparison</td>
+</tr>
+<tr>
+<td>H-04</td>
+<td>ECG backlog overrun — samples silently lost</td>
+<td>Detector can't keep up with producer under load</td>
+<td>Gap in detection coverage, could delay arrhythmia recognition</td>
+<td>Major</td>
+<td>Medium (under sustained overload)</td>
+<td>Counting semaphore + bounded ring (depth 8) makes overrun <strong>counted</strong>, not silent (<code>ecg_overrun_count</code>); batch-drain consumer clears backlog every cycle; sustained overrun escalates the degradation ladder</td>
+<td><code>OVERLOAD_DEMO=1</code> forces <code>ecg_overrun_count &gt; 0</code>; mode escalation is visible in the log</td>
+</tr>
+<tr>
+<td>H-05</td>
+<td>Alarm/mode "flapping" between normal and degraded states</td>
+<td>No hysteresis around the degradation thresholds</td>
+<td>Alarm fatigue, confusing UI, wasted CPU on repeated transitions</td>
+<td>Minor</td>
+<td>Medium (without mitigation)</td>
+<td>Asymmetric hysteresis: 3 consecutive bad 100 ms checks to escalate (300 ms), 10 consecutive clean checks to recover (1000 ms) — fail fast, recover cautiously</td>
+<td><code>mode_transition_count</code>; transitions should cluster around genuine load onset/offset, not oscillate every check</td>
+</tr>
+<tr>
+<td>H-06</td>
+<td>System-fault state visually confused with patient-alarm state</td>
+<td>A single shared indicator would conflate "the monitor is unwell" with "the patient is unwell"</td>
+<td>Clinician misreads a system fault as a stable patient, or vice versa</td>
+<td>Major</td>
+<td>Medium (if indicators were shared)</td>
+<td>Physically separate LEDs (<code>LED_ALARM_GPIO</code> red vs. <code>LED_FAULT_GPIO</code> yellow) and separate fields (<code>alarm_active</code> vs. <code>mode</code>) that can be independently true/false</td>
+<td>Dashboard/log show both fields independently in all four combinations</td>
+</tr>
+<tr>
+<td>H-07</td>
+<td>Torn read on multi-field <code>patient_record_t</code></td>
+<td>Concurrent writers without serialized access</td>
+<td>Corrupted HR reading, stale/contradictory alarm flag, inconsistent snapshot</td>
+<td>Major</td>
+<td>Low (mitigated by design)</td>
+<td><code>xSemaphoreCreateMutex</code> around every access via <code>record_lock</code>/<code>record_unlock</code></td>
+<td><code>INDUCE_FAILURE=1</code> removes the mutex specifically to reproduce and observe the torn read</td>
+</tr>
+<tr>
+<td>H-08</td>
+<td>Priority inversion delays the alarm task behind lower-priority work</td>
+<td>A shared lock without priority inheritance lets a low-priority holder be preempted by medium-priority work while blocking the high-priority alarm task</td>
+<td>Same effect as H-03, via a different root cause</td>
+<td>Catastrophic (inherits H-03's severity)</td>
+<td>Low (mitigated by design)</td>
+<td><code>record_mutex</code> is a real FreeRTOS mutex (priority inheritance ON), not a binary semaphore used as a lock</td>
+<td><code>PRIORITY_INVERSION_DEMO=1</code> with <code>LOCK_TYPE=LOCK_BINARY</code> reproduces unbounded inversion for contrast against the default <code>LOCK_MUTEX</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="6-graceful-degradation">6. Graceful degradation</h2>
+<h3 id="61-the-ladder">6.1 The ladder</h3>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Trigger (checked every 100 ms)</th>
+<th>What's shed</th>
+<th>What's never shed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>NORMAL</code></td>
+<td>Default</td>
+<td>—</td>
+<td>everything</td>
+</tr>
+<tr>
+<td><code>DEGRADED_1</code></td>
+<td>3 consecutive bad checks (ring overrun, telemetry drop &gt; 2, or a coordinator rendezvous timeout)</td>
+<td><code>task_alarm_dispatch</code> (telemetry), <code>task_coordinator</code> (latency instrumentation)</td>
+<td>vitals, detection, alarm</td>
+</tr>
+<tr>
+<td><code>DEGRADED_2</code></td>
+<td>Condition persists after <code>DEGRADED_1</code></td>
+<td>+ <code>task_data_log</code> (housekeeping)</td>
+<td>vitals, detection, alarm</td>
+</tr>
+<tr>
+<td><code>SAFE_MINIMAL</code></td>
+<td><strong>Immediate</strong>, no hysteresis: ECG heartbeat watchdog stall (H-01) or a mutex timeout (H-02)</td>
+<td>everything except the never-shed path</td>
+<td><code>task_ecg_sample</code>, <code>task_arrhy_detect</code>, <code>task_alarm_isr</code>, <code>task_degr_manager</code> itself</td>
+</tr>
+</tbody>
+</table>
+<p>Recovery steps back up one rung at a time after <strong>10 consecutive clean 100 ms checks</strong><br />
+(1 second) — deliberately slower than the 300 ms escalation path (H-05).</p>
+<h3 id="62-design-rule">6.2 Design rule</h3>
+<p><strong>Shed observability and convenience before function, and never hide degradation.</strong><br />
+Concretely: <code>task_alarm_dispatch</code> and <code>task_data_log</code> only ever produce logs/telemetry — cut<br />
+them and the patient-facing behavior is unchanged. <code>task_coordinator</code> only measures pipeline<br />
+latency — cut it and nothing downstream even notices. <code>task_degr_manager</code> itself is never<br />
+shed because it is the only thing that can recover the system; a monitor that degrades and<br />
+then loses its own ability to notice or announce that fact (H-06) is worse than one that<br />
+stays visibly broken. That's why <code>LED_FAULT_GPIO</code> is driven directly by<br />
+<code>task_degr_manager</code>, independent of every other task's health.</p>
+<h3 id="63-demonstrating-it-live">6.3 Demonstrating it live</h3>
+<p>Build with <code>OVERLOAD_DEMO=1</code> to spin up a CPU-bound task at priority 7 (between<br />
+<code>task_alarm_dispatch</code> and <code>task_degr_manager</code>) that saturates Core 1 enough to force<br />
+<code>ecg_overrun_count</code> and <code>alarm_dispatch_drops</code> upward, driving the ladder through<br />
+<code>DEGRADED_1</code> → <code>DEGRADED_2</code> in real time — watch <code>LED_FAULT_GPIO</code> and the dashboard/log<br />
+step through the modes without recompiling anything else.</p>
+<hr />
+<h2 id="7-iec-62304-tailored-general-embedded-safety-profile">7. IEC 62304 — tailored general-embedded safety profile</h2>
+<p>This section borrows IEC 62304's <em>way of thinking</em> about medical device software — safety<br />
+classification, hazard-driven design, documented verification — without claiming<br />
+compliance, certification, or fitness for any clinical use. It is a narrative mapping, not<br />
+a clause-by-clause audit.</p>
+<p><strong>Safety classification reasoning (not a formal classification):</strong> if Bed 4-A's alarm<br />
+function were built into a real product, the relevant question per 62304 is "could software<br />
+failure contribute to death or serious injury?" — here, yes: a delayed or missed arrhythmia<br />
+alarm could delay clinical intervention. That reasoning is <em>why</em> the design treats the alarm<br />
+path (H-03, H-08) as the one thing that is never shed and always highest priority, even<br />
+though the artifact itself — a Wokwi simulation with a synthetic waveform and no patient<br />
+interface — is not itself operating at that level of risk. The design behaves as if it were<br />
+Class B/C-relevant; the deployment context is not.</p>
+<p><strong>Lifecycle activities present, in spirit:</strong></p>
+<table>
+<thead>
+<tr>
+<th>62304-flavored activity</th>
+<th>What stands in for it here</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Requirements</td>
+<td>The periodic task set + timing budgets (Section 4), inherited from App 2 and extended</td>
+</tr>
+<tr>
+<td>Architecture</td>
+<td>Task/priority/IPC design (Sections 2–3), never-shed vs. sheddable split</td>
+</tr>
+<tr>
+<td>Detailed design</td>
+<td>Per-task header comments in <code>main.c</code>; this README</td>
+</tr>
+<tr>
+<td>Risk management</td>
+<td>The hazard table (Section 5), FMEA-lite rather than full ISO 14971</td>
+</tr>
+<tr>
+<td>Verification</td>
+<td>WCET/deadline-miss instrumentation, response-time analysis, and the fault-injection demo modes (Section 6 above / toggles below) used as <strong>directed tests of specific failure modes</strong></td>
+</tr>
+<tr>
+<td>Problem resolution</td>
+<td>The degradation ladder is a runtime problem-resolution mechanism; the demo toggles let a specific defect class be reproduced on demand for study. Section 4.6 documents two real examples from this project's own verification session — a boot-time watchdog race and a simulated-switch-bounce artifact — found, root-caused, and fixed</td>
+</tr>
+</tbody>
+</table>
+<p><strong>What real IEC 62304 compliance would additionally require, and this project does not<br />
+attempt:</strong> a maintained Software Development Plan and Design History File; independent<br />
+verification and validation; a full requirements-to-test traceability matrix; a formal ISO<br />
+14971 risk management file with residual-risk sign-off; usability engineering per IEC 62366;<br />
+cybersecurity treatment per IEC 81001-5-1; qualified/traceable hardware and a controlled<br />
+build/release process; and a regulatory submission. None of that exists here, and none of<br />
+this project's claims should be read as implying otherwise.</p>
+<hr />
+<h2 id="8-diagnostic-demonstration-modes-compile-time-toggles">8. Diagnostic / demonstration modes (compile-time toggles)</h2>
+<p>All default to <code>0</code> — the default build is the safe, production-shaped one. Each toggle<br />
+reproduces a specific graded experiment so the evidence those assignments generated stays<br />
+reproducible from this single codebase.</p>
+<table>
+<thead>
+<tr>
+<th>Toggle</th>
+<th>Default</th>
+<th>What it does</th>
+<th>What it demonstrates</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USE_WEBSERVER</code></td>
+<td>1</td>
+<td>0 = serial-only fallback</td>
+<td>App 1's Wi-Fi/gateway was flaky in Wokwi during grading; this keeps proof-of-life available without it</td>
+</tr>
+<tr>
+<td><code>BREAK_ISR_SAFETY_RULE</code></td>
+<td>0</td>
+<td>1 = drop <code>portYIELD_FROM_ISR</code> in the STAT ISR</td>
+<td>The latency cost of deferred preemption — compare <code>alarm_latency_max_us</code> with it on vs. off (H-03 evidence)</td>
+</tr>
+<tr>
+<td><code>INDUCE_FAILURE</code></td>
+<td>0</td>
+<td>1 = remove the mutex around <code>patient_record</code></td>
+<td>A reproducible torn read (H-07 evidence)</td>
+</tr>
+<tr>
+<td><code>PRIORITY_INVERSION_DEMO</code></td>
+<td>0</td>
+<td>1 = run an isolated H/M/L demo alongside the system (<code>LOCK_TYPE</code> selects mutex vs. binary-sem-as-lock)</td>
+<td>Priority inversion with vs. without inheritance (H-08 evidence). Demo priorities (19/9/1) are offset from the production set on purpose — see the comment above the demo code for why a tie would itself be a hazard</td>
+</tr>
+<tr>
+<td><code>OVERLOAD_DEMO</code></td>
+<td>0</td>
+<td>1 = saturate Core 1 with a CPU-bound task</td>
+<td>Forces the degradation ladder to step down live (Section 6.3)</td>
+</tr>
+</tbody>
+</table>
+<p>Build any of these by defining them at the top of <code>main.c</code> (or via <code>idf.py build
+-DUSE_WEBSERVER=0</code>-style overrides if you prefer not to edit the file) and reflashing.<br />
+Only run one demo mode at a time unless you're specifically studying their interaction —<br />
+e.g. <code>PRIORITY_INVERSION_DEMO</code> and <code>OVERLOAD_DEMO</code> together will make the schedule<br />
+genuinely hard to reason about, which is realistic but not a controlled experiment.</p>
+<hr />
+<h2 id="9-wokwi-setup-verification">9. Wokwi setup &amp; verification</h2>
+<ol>
+<li>Create a fresh ESP-IDF project at <code>https://wokwi.com/projects/new/esp32-s3</code>.</li>
+<li>Replace <code>diagram.json</code>, <code>wokwi.toml</code>, <code>sdkconfig.defaults</code>, and <code>main/CMakeLists.txt</code><br />
+   with the versions in this folder.</li>
+<li>Place this folder's <code>main/main.c</code> at <code>main/main.c</code> (or adjust <code>main/CMakeLists.txt</code>'s<br />
+<code>SRCS</code>/<code>INCLUDE_DIRS</code> if Wokwi's template uses <code>main/src/main.c</code> instead).</li>
+<li>Confirm the top-level <code>CMakeLists.txt</code>'s <code>project(bed4a_capstone)</code> matches the<br />
+<code>firmware</code>/<code>elf</code> paths in <code>wokwi.toml</code>.</li>
+<li>Click ▶. First build is ~30–60 s; ccache speeds up subsequent builds.</li>
+<li>Confirm in the serial monitor:<br />
+   - Boot log shows all toggle states (<code>USE_WEBSERVER=1 BREAK_ISR_SAFETY_RULE=0 ...</code>).<br />
+   - The first <code>[Bed 4-A]</code>/<code>=== BED 4-A ===</code> lines show <code>mode=NORMAL</code>, not an immediate<br />
+<code>[degradation] -&gt; SAFE_MINIMAL</code> error — if you see that error, you have the pre-fix<br />
+     version of <code>task_degr_manager</code>; see Section 4.6, Bug 1, for the two-line fix.<br />
+   - Pressing <strong>STAT</strong> (GPIO 4) produces a <code>[STAT ALARM]</code> line with a latency figure, and<br />
+<code>LED_ALARM_GPIO</code> lights for ~300 ms. If a single click produces dozens of ISR fires<br />
+     instead of one, add <code>"bounce": "0"</code> to both buttons' <code>"attrs"</code> in <code>diagram.json</code><br />
+     (Section 4.6, Bug 2).<br />
+   - Pressing <strong>SIM</strong> (GPIO 18) injects a 1 s abnormal-rhythm burst; watch for the detector<br />
+     to flag it and trigger the same alarm path (<code>sw_trigger_count</code> increments).</li>
+<li>If Wi-Fi/gateway is available, open the network indicator in the Wokwi panel for the<br />
+   dashboard at <code>/</code>; if not, the serial log alone is sufficient proof of life, same call<br />
+   App 1's README made.</li>
+<li>Section 4.6 reports the results of the verification session performed against this exact<br />
+   setup procedure, including both bugs found above and how they were fixed.</li>
+</ol>
+<hr />
+<h2 id="10-known-limitations">10. Known limitations</h2>
+<ul>
+<li>WCET figures in Section 4.2 are <strong>design-time budgets</strong> (a standard pre-hardware scheduling<br />
+  methodology, not an incomplete one), not hardware-measured worst-case times. The<br />
+  verification session in Section 4.6 confirmed the counters that gate safety-relevant<br />
+  behavior — ring overruns, mutex timeouts, and mode transitions — stayed clean across<br />
+  multiple runs, but did not separately record the raw per-task <code>wcet_*_us</code> figures.</li>
+<li>The response-time analysis models Core 1 in isolation; it does not account for<br />
+  ESP32-S3 cache/flash-access stalls or for any interference from Core 0's Wi-Fi/lwIP<br />
+  activity, which is why the utilization margin (Section 4.4) is kept deliberately large.</li>
+<li>The simulated ECG waveform (<code>task_ecg_sample</code>'s IIR stand-in) is a deterministic synthetic<br />
+  signal, not a clinically realistic rhythm — it is a load/timing stand-in, same as it was in<br />
+  Apps 3–5.</li>
+<li>The arrhythmia detector's variance threshold (<code>std &gt; 6000.0f</code>) and the synthetic waveform<br />
+  generator were both carried over unchanged from Apps 4/5. On this waveform the threshold<br />
+  fires far more often than a calibrated device should — <code>sw_trigger_count</code> climbs steadily<br />
+  even with no button pressed. This is a <strong>detection-calibration</strong> issue, not a concurrency or<br />
+  scheduling defect: the alarm path itself (ISR, mutex, LED, response-time behavior) is correct<br />
+  regardless of how often it's exercised. Retuning the threshold against a more realistic<br />
+  waveform is future work.</li>
+<li>There is no persistent storage of alarm history beyond the current session's serial log.</li>
+<li>This is a single build target; the demo toggles are compile-time, not runtime-switchable<br />
+  without reflashing.</li>
+</ul>
+<hr />
+<h2 id="11-engineering-analysis">11. Engineering analysis</h2>
+<p><strong>Q1. Why does <code>task_degr_manager</code> never get shed, even under the worst overload?</strong><br />
+Because it's the only task that can <em>notice</em> overload and the only one that can recover the<br />
+system back up the ladder. A monitor that degrades and then loses the ability to detect or<br />
+announce its own degraded state has failed silently — the one failure mode this whole design<br />
+is built to avoid (H-06). Its own cost is tiny (200 µs budget every 100 ms), so there's no<br />
+real efficiency argument for shedding it anyway.</p>
+<p><strong>Q2. Why does the alarm path use a queue for telemetry but not for the alarm itself?</strong><br />
+The alarm <em>output</em> (GPIO + <code>patient_record.alarm_active</code>) happens synchronously inside<br />
+<code>task_alarm_isr</code>, directly, with no queue in the loop — a full queue could be a full queue,<br />
+and a full queue must never be the reason an alarm doesn't fire. The <em>telemetry</em> about that<br />
+alarm (<code>alarm_evt_q</code>) is explicitly allowed to fill and drop (<code>alarm_dispatch_drops</code>)<br />
+because losing a log line is an acceptable failure mode and losing the LED is not.</p>
+<p><strong>Q3. Why asymmetric hysteresis (300 ms up, 1000 ms down) instead of symmetric?</strong><br />
+Because the cost of the two mistakes isn't symmetric. Staying in <code>NORMAL</code> too long during a<br />
+real overload risks H-01/H-04 getting worse before anything reacts — escalate fast. Coming<br />
+back to <code>NORMAL</code> too early during a temporary blip risks flapping (H-05) and repeatedly<br />
+tearing down/rebuilding sheddable state for no benefit — recover slowly. This is standard<br />
+alarm-management practice outside of RTOS design too (e.g. clinical alarm systems generally<br />
+require a condition to clear and stay clear before silencing an alert).</p>
+<p><strong>Q4. Why is <code>task_ui_notify</code> at priority 13 instead of the same priority as<br />
+<code>task_alarm_isr</code>, the way App 3's original comparison had both bottom-halves at prio 12?</strong><br />
+App 3's experiment isolated the two primitives to compare them without a confound — that's<br />
+a valid thing to do in a controlled test, but wrong for production. Here, the notification<br />
+path only refreshes a UI timestamp; it should never be able to contend with the safety<br />
+alarm path for CPU time. The capstone keeps the comparison (both still measure latency from<br />
+the same ISR) but no longer pretends the two consumers deserve equal priority in a real<br />
+system — that priority gap is itself part of the design, not an oversight.</p>
+<hr />
+<h2 id="12-ai-disclosure">12. AI disclosure</h2>
+<p>This capstone's integration work — merging the five prior assignments into one task set,<br />
+designing the degradation-manager and its thresholds, adding WCET/deadline-miss<br />
+instrumentation, building the hazard table, and writing this README — was drafted with AI<br />
+assistance from Claude (Anthropic), working from Brian McKinley's own five graded<br />
+submissions as the source material for every inherited primitive and task body. Each<br />
+inherited element is tagged with its originating assignment in <code>main.c</code>'s section headers<br />
+and in Section 1's table above, so the AI-authored <em>integration</em> is distinguishable from<br />
+McKinley's own <em>prior graded work</em> that it integrates. Per-assignment AI disclosures from<br />
+Apps 1–5 (documenting AI use during those original submissions) remain the record for that<br />
+earlier work and are not superseded by this one.</p>
+      </div>
+    </details>
+  </section>
+</div>
+
+
+<div class="wrap">
+  <footer>
+    <p>Bed 4-A &mdash; EEE 4775 Real-Time Systems capstone. Coursework simulation, not a
+      certified medical device. Built on Brian McKinley's five graded assignments, integrated
+      with AI assistance from Claude (Anthropic) &mdash; see the AI disclosure in the full
+      README below. &nbsp;<a href="README.md">README.md</a></p>
+  </footer>
+</div>
+
+</body>
+</html>
